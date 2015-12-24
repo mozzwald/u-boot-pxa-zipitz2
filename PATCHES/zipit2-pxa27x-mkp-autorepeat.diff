@@ -1,0 +1,140 @@
+diff --git a/drivers/input/pxa27x-mkp.c b/drivers/input/pxa27x-mkp.c
+index c67b9e6..e2a9fdd 100644
+--- a/drivers/input/pxa27x-mkp.c
++++ b/drivers/input/pxa27x-mkp.c
+@@ -40,9 +40,16 @@ struct {
+ 	CONFIG_PXA27X_MKP_KEYMAP,
+ };
+ 
+-static char queue[64] = {0};
++static unsigned char queue[64] = {0};
+ static int queue_len;
+ 
++// autorepeat stuff
++static unsigned char last_key = 0xff;
++static char key_counter = 0;
++// number of key scans before autorepeat kicks in
++#define	KEY_REPEAT_FIRST	12
++#define	KEY_REPEAT_NEXT		2
++
+ enum {
+ 	MOD_NONE,
+ 	MOD_SHIFT,
+@@ -71,22 +78,31 @@ static void kbd_lookup(int row, int col, int mod)
+ 
+ 	while (!(keymap[i].col == 0xff && keymap[i].row == 0xff)) {
+ 		if (keymap[i].row == row && keymap[i].col == col) {
++			static char key = 0xff;
+ 			switch (mod) {
+ 			case MOD_NONE:
+-				queue[queue_len] = keymap[i].key;
++				key = keymap[i].key;
+ 				break;
+ 			case MOD_SHIFT:
+-				queue[queue_len] = keymap[i].shift;
++				key = keymap[i].shift;
+ 				break;
+ 			case MOD_ALT:
+-				queue[queue_len] = keymap[i].alt;
++				key = keymap[i].alt;
+ 				break;
+ 			case MOD_CTRL:
+-				queue[queue_len] = keymap[i].ctrl;
++				key = keymap[i].ctrl;
+ 				break;
+ 			}
+-			if (queue[queue_len] != 0xff)
+-				queue_len++;
++			if ( key != 0xff) {
++				if (key != last_key) {
++					queue[queue_len++]=key; last_key=key; key_counter=0;
++				} else // same key as before
++					if (key_counter<KEY_REPEAT_FIRST) key_counter++; //ignore key press
++					else { // ok, autorepeat
++						queue[queue_len++]=key;
++						key_counter = (KEY_REPEAT_FIRST-KEY_REPEAT_NEXT);
++					} 
++			}
+ 		}
+ 		i++;
+ 	}
+@@ -98,10 +114,23 @@ static void kbd_read(void)
+ 	int col, row;
+ 	int modif = 0;
+ 	int mod = MOD_NONE;
+-
+-	KPC |= KPC_AS;
+-	while (KPC & KPC_AS);
+-
++	int numkeys;
++	KPC |= KPC_AS; // start one automatic scan
++	while (KPC & KPC_AS); // wait for scan to finish
++
++	numkeys = (KPAS>>26)&0x1f;
++	if (numkeys == 0) { // no key pressed, clear autorepeat counter
++		last_key=0xFF; key_counter=0;
++	} else if (numkeys == 1) { // exactly one key pressed
++		reg = KPAS&0xFF; col=reg&0x0F; row=reg>>4;
++		if (kbd_get_mdf(row, col) != MOD_NONE) { //modifier only
++			// TODO handle sticky modifiers here
++			last_key=0xFF; key_counter=0; // no real key, clear autorepeat counter
++		} else {
++			kbd_lookup(row, col, mod);
++		}
++	}  else { 
++	//multiple keys pressed, check KPASMKPx registers
+ 	for (modif = 1; modif >= 0; modif--) {
+ 		for (col = 0; col < 8; col += 2) {
+ 			while ((reg = KPASMKP(col >> 1)) & KPASMKPx_SO);
+@@ -125,6 +154,7 @@ static void kbd_read(void)
+ 			}
+ 		}
+ cont:		while(0) {};
++	} //for
+ 	}
+ }
+ 
+diff --git a/include/configs/zipitz2.h b/include/configs/zipitz2.h
+index cdfcdcc..360b147 100644
+--- a/include/configs/zipitz2.h
++++ b/include/configs/zipitz2.h
+@@ -206,8 +206,8 @@ unsigned char zipitz2_spi_read(void);
+ #define	CONFIG_PXA27X_MKP_MKP_COLS	7
+ #define	CONFIG_PXA27X_MKP_MKP_ROWS	6
+ 
+-#define	CONFIG_PXA27X_MKP_DEBOUNCE	150
+-#define	CONFIG_PXA27X_MKP_DELAY		150000
++#define	CONFIG_PXA27X_MKP_DEBOUNCE	30
++#define	CONFIG_PXA27X_MKP_DELAY		30000
+ 
+ #define	CONFIG_PXA27X_MKP_MOD_SHIFT	{5, 3}
+ #define	CONFIG_PXA27X_MKP_MOD_ALT	{5, 2}
+@@ -231,7 +231,7 @@ unsigned char zipitz2_spi_read(void);
+ 	{ 3, 3, 'j', 'J', '[', 0xff },		\
+ 	{ 4, 3, 'v', 'V', '*', 0xff },		\
+ 	\
+-	{ 0, 4, '\e', 0xff, 0xff, 0xff },	\
++	{ 0, 4, '\e', 0xff, '|', 0xff },	\
+ 	{ 1, 4, 'r', 'R', '4', 0xff },		\
+ 	{ 2, 4, 'a', 'A', '$', 0xff },		\
+ 	{ 3, 4, 'k', 'K', ']', 0xff },		\
+@@ -246,15 +246,15 @@ unsigned char zipitz2_spi_read(void);
+ 	\
+ 	{ 1, 6, 'y', 'Y', '6', 0xff },		\
+ 	{ 2, 6, 'd', 'D', '&', 0xff },		\
+-	{ 3, 6, '\b', 0xff, 0xff, 0xff },	\
++	{ 3, 6, '\b', 0xff, '\\', 0xff },	\
+ 	{ 4, 6, 'm', 'M', '?', 0xff },		\
+-	{ 5, 6, ',', 0xff, 0xff, 0xff },	\
++	{ 5, 6, ',', '(', '<', '{' },	\
+ 						\
+ 	{ 1, 7, 'u', 'U', '7', 0xff },		\
+ 	{ 2, 7, 'f', 'F', '@', 0xff },		\
+ 	{ 3, 7, 'z', 'Z', '!', 0xff },		\
+-	{ 4, 7, ';', 0xff, ':', 0xff },		\
+-	{ 5, 7, '.', 0xff, 0xff, 0xff },	\
++	{ 4, 7, ';', '~', ':', 0xff },		\
++	{ 5, 7, '.', ')', '>', '}' },	\
+ 						\
+ 	{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }
+ 
